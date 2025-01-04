@@ -1,5 +1,5 @@
 use core::panic;
-use std::{fs::OpenOptions, io::{self, Write}, iter::Scan};
+use std::{fs::OpenOptions, io::{self, Write}};
 
 use crate::{memory::Memory, rom::{header::{Mirroring, HEADER_SIZE}, Rom}};
 
@@ -85,6 +85,7 @@ pub struct Ppu {
     pub frame_buffer: [u8; 256 * 240 * 3],
 
     nt_byte: u8,
+    at_byte: u8,
     at_latch_lo: u8,
     at_latch_hi: u8,
     pt_latch_lo: u8,
@@ -128,6 +129,7 @@ impl Ppu {
             frame_ready: false,
 
             nt_byte: 0,
+            at_byte: 0,
             at_latch_lo: 0,
             at_latch_hi: 0,
             pt_latch_lo: 0,
@@ -225,24 +227,36 @@ impl Ppu {
         }
     }
 
+    fn reload_shifters(&mut self)
+    {
+        self.pt_shifter_lo = (self.pt_shifter_lo & 0xFF00) | self.pt_latch_lo as u16;
+        self.pt_shifter_hi = (self.pt_shifter_hi & 0xFF00) | self.pt_latch_hi as u16;
+
+        self.at_latch_lo = self.at_byte & 1;
+        self.at_latch_hi = self.at_byte & 2;
+    }
+
     fn load_shift_registers(&mut self) {
         match self.cycle {
             1..=256 | 321..=336 => {
-                self.pt_shifter_lo <<= 1;
-                self.pt_shifter_hi <<= 1;
-                self.at_shifter_lo <<= 1;
-                self.at_shifter_hi <<= 1;
 
                 match (self.cycle - 1) % 8 {
                     0 => { //Correct
                         self.nt_byte = self.get_nt();
                     }
                     2 => { //Correct
-                        let at_byte = self.get_attribute();
-                        let shift = ((self.v >> 4) & 4) | (self.v & 2);
-                        let attr_bits = (at_byte >> shift) & 0x3;
-                        self.at_latch_lo = attr_bits & 1;
-                        self.at_latch_hi = (attr_bits >> 1) & 1;
+              
+                        self.at_byte = self.get_attribute();
+                        
+                        if (self.coarse_y() & 2) != 0 {
+                            self.at_byte >>= 4;
+                        }
+
+                        if (self.coarse_x() & 2) != 0 {
+                            self.at_byte >>= 2;
+                        }
+                        
+                        
                     }
                     4 => { //Correct
                         let addr = self.bg_pattern_table_address() + (self.nt_byte as u16 * 16) + self.fine_y();
@@ -253,20 +267,15 @@ impl Ppu {
                         self.pt_latch_hi = self.read(addr + 8);
                     }
                     7 => {
-                        self.pt_shifter_lo = (self.pt_shifter_lo & 0xFF00) | self.pt_latch_lo as u16;
-                        self.pt_shifter_hi = (self.pt_shifter_hi & 0xFF00) | self.pt_latch_hi as u16;
-
-                        if self.at_latch_lo != 0 {
-                            self.at_shifter_lo |= 0xFF;
-                        }
-                        if self.at_latch_hi != 0 {
-                            self.at_shifter_hi |= 0xFF;
-                        }
+                        self.reload_shifters();
                     }
                     _ => {}
                 }
             }
             257..=320 => {
+                if self.cycle == 257 {
+                    self.reload_shifters();
+                }
             }
             337 => {
                 self.nt_byte = self.get_nt();
@@ -297,9 +306,7 @@ impl Ppu {
                 let shift = (15 - fine_x) as u16;
                 bg_pixel = ((((self.pt_shifter_hi >> shift) & 1) << 1) | ((self.pt_shifter_lo >> shift) & 1)) as u8;
 
-                // Extract palette bits from attribute shifters
-                // Attribute shifters are synchronized with pattern table shifters
-                bg_palette = (((self.at_shifter_hi >> (7 - fine_x)) & 1) << 1) | ((self.at_shifter_lo >> (7 - fine_x)) & 1);
+                bg_palette = ((((self.at_shifter_hi >> (7 - fine_x)) & 1) << 1) | ((self.at_shifter_lo >> (7 - fine_x)) & 1)) << 2;
             }
         }
     
@@ -326,7 +333,7 @@ impl Ppu {
         //     }
         // }
 
-        let palette_idx = if bg_pixel == 0 { 0 } else { (bg_palette << 2) | bg_pixel };
+        let palette_idx = if bg_pixel == 0 { 0 } else { (bg_palette) | bg_pixel };
         
         
         let color = (self.palette[palette_idx as usize] & 0x3F) as usize;
@@ -335,11 +342,16 @@ impl Ppu {
         let idx = (y * 256 + x) * 3;
 
         // Update frame buffer with bounds checking
-        if idx + 2 < self.frame_buffer.len() {
+
             self.frame_buffer[idx] = PALETTE[color * 3];
             self.frame_buffer[idx + 1] = PALETTE[(color * 3) + 1];
             self.frame_buffer[idx + 2] = PALETTE[(color * 3) + 2];
-        }
+
+
+        self.pt_shifter_lo <<= 1;
+        self.pt_shifter_hi <<= 1;
+        self.at_shifter_lo = (self.at_shifter_lo << 1) | self.at_latch_lo;
+        self.at_shifter_hi = (self.at_shifter_hi << 1) | self.at_latch_hi;
 
     }
 
@@ -593,6 +605,13 @@ impl Ppu {
         (self.v >> 12) & 7
     }
 
+    fn coarse_y(&self) -> u16 {
+        (self.v & 0x3E0) >> 5
+    }
+
+    fn coarse_x(&self) -> u16 {
+        self.v & 0x1F
+    }
     //CORRECT
     fn increment_h(&mut self) {
         if (self.v & 0x001F) == 31 {
