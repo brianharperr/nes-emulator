@@ -1,4 +1,4 @@
-use crate::{memory::Memory, ppu::Ppu, ppu2::Ppu2};
+use crate::{memory::Memory, ppu::Ppu};
 
 const CPU_RAM_SIZE: usize = 0x800; //2KB
 

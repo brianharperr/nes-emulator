@@ -1,5 +1,5 @@
 
-use std::{fs::{self, File, OpenOptions}, io::{self, Write}};
+use std::{fs::OpenOptions, io::{self, Write}};
 
 use crate::SystemVersion;
 use super::{bus::Bus, instructions::{AddressingMode, Instruction, OPCODE_TABLE}};
@@ -55,8 +55,7 @@ pub struct Cpu {
     db_y: u8,
     db_pc: u16,
     db_sp: u8,
-    db_p: u8,
-    db_status: u8,
+    db_p: u8
 }
 
 impl Cpu {
@@ -92,8 +91,7 @@ impl Cpu {
             db_y: 0,
             db_pc: 0,
             db_sp: 0,
-            db_p: 0,
-            db_status: 0,
+            db_p: 0
         }
     }
 

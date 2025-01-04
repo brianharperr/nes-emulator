@@ -141,7 +141,6 @@ impl Ppu {
     }
 
     pub fn step(&mut self){
-        //println!("{}, {}", self.scanline, self.cycle);
         let render = self.is_rendering_enabled();
         match Scanline::from(self.scanline) {
             Scanline::PreRender => {
@@ -290,7 +289,6 @@ impl Ppu {
         let mut bg_pixel = 0u8;
         let mut bg_palette = 0u8;
     
-        // println!("{}", self.is_bg_rendering_enabled());
         if self.is_bg_rendering_enabled() {
             // Skip the leftmost 8 pixels if background clipping is enabled
             if self.cycle >= 8 || self.is_leftmost_bg_rendering_enabled() {
@@ -329,6 +327,8 @@ impl Ppu {
         // }
 
         let palette_idx = if bg_pixel == 0 { 0 } else { (bg_palette << 2) | bg_pixel };
+        
+        
         let color = (self.palette[palette_idx as usize] & 0x3F) as usize;
         let x = self.cycle - 1;
         let y = self.scanline;
@@ -345,14 +345,12 @@ impl Ppu {
 
     fn get_nt(&mut self) -> u8{
         let addr = 0x2000 | (self.v & 0x0FFF);
-        let data = self.read(addr);
-        data
+        self.read(addr)
     }
 
     fn get_attribute(&mut self) -> u8{
         let addr = 0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07);
-        let data = self.read(addr);
-        data
+        self.read(addr)
     }
 
 
@@ -407,6 +405,9 @@ impl Ppu {
                 match self.append_to_file("nt.log", &output_str) {
                     Ok(_) => (),
                     Err(e) => eprintln!("Error writing to file: {}", e),
+                }
+                if data == 0x2A {
+                    // panic!();
                 }
                 self.vram.write(mirr_addr, data);
             }
@@ -556,17 +557,15 @@ impl Ppu {
 
     //Might be wrong
     fn increment_vram_addr(&mut self){
-        let scanline = Scanline::from(self.scanline);
-        if !self.is_rendering_enabled(){
-            let increment = if (self.ctrl & 0x04) != 0 { 32 } else { 1 };
-            self.v = (self.v + increment) & 0x7FFF;
-        }else {
-            self.increment_h();
-            self.increment_v();
-        }
+        let increment = if (self.ctrl & 0x04) != 0 { 32 } else { 1 };
+        self.v = (self.v + increment) & 0x7FFF;
     }
 
     fn is_rendering_enabled(&self) -> bool{
+        self.mask & 0x18 != 0
+    }
+
+    fn is_sprite_enabled(&self) -> bool{
         self.mask & 0x10 != 0
     }
 

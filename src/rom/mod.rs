@@ -3,7 +3,7 @@ pub mod header;
 
 use header::{RomHeader, HEADER_SIZE};
 
-use crate::{mapper::{Mapper, MapperFactory}, memory::Memory};
+use crate::mapper::{Mapper, MapperFactory};
 
 pub struct Rom {
     pub header: RomHeader,

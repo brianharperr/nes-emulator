@@ -4,7 +4,6 @@ pub mod mapper;
 pub mod mappers;
 pub mod rom;
 pub mod memory;
-pub mod ppu2;
 use std::fs;
 
 use cpu::Cpu;

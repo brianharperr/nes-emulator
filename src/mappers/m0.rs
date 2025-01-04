@@ -62,6 +62,7 @@ impl Mapper for Mapper0 {
     }
 
     fn write(&mut self, addr: u16, data: u8) {
+
         match addr {
             // CHR RAM writes (if present)
             0x0000..=0x1FFF => {
