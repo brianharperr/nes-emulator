@@ -123,6 +123,17 @@ impl Cpu {
 
     pub fn step(&mut self){
 
+        if self.bus.dma_transfer.0 {
+            let bank = self.bus.dma_transfer.1;
+            for i in 0..256 {
+                let addr = bank as u16 * 0x100 + i;
+                let data = self.read_byte(addr);
+                self.bus.ppu.write_oamdata(data);
+            }
+            self.bus.cycles += 514;
+            self.bus.dma_transfer = (false, 0);
+        }
+
         if self.update_interrupt_disable.0 {
             self.set_flag(StatusFlag::InterruptDisable, self.update_interrupt_disable.1 != 0);
             self.update_interrupt_disable = (false, 0);
@@ -142,11 +153,7 @@ impl Cpu {
         let page_cross_cycle = (instruction.function)(self, instruction.mode);
         let cycles = instruction.min_cycles + page_cross_cycle;
 
-        // if self.read_byte(0x6000) != 80 {
-        // println!("{:?}", self.get_test_result());
-        // }else{
-        //     println!("{:X}", self.read_byte(0x6000));
-        // }
+
         if self.debug_mode {
             let operands_str = self.operand.iter()
                 .map(|op| format!("{:02X}", op))

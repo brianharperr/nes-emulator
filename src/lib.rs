@@ -4,6 +4,8 @@ pub mod mapper;
 pub mod mappers;
 pub mod rom;
 pub mod memory;
+pub mod controller;
+
 use std::fs;
 
 use cpu::Cpu;
@@ -69,25 +71,24 @@ impl Nes {
     pub fn dump_ppu(&mut self) -> std::io::Result<()> {
         use std::fs::File;
         use std::io::Write;
-    
+        
         let mut file = File::create("nametable_dump.txt")?;
-    
-        println!("{:X}",self.cpu.bus.ppu.read(0x2060));
+        
         // Write header
-        writeln!(file, "NES Nametable Memory Dump")?;
-        writeln!(file, "=======================")?;
-    
+        writeln!(file, "NES PPU Memory Dump")?;
+        writeln!(file, "==================")?;
+        
         // Dump all four nametables (0x2000-0x2FFF)
         for nt in 0..4 {
             let base_addr = 0x2000 + (nt * 0x400);
             writeln!(file, "\nNametable {}", nt)?;
             writeln!(file, "-------------")?;
-    
+            
             // Print each row of the 32x30 nametable
             for y in 0..30 {
                 // Write row number
                 write!(file, "{:02X}: ", y)?;
-    
+                
                 // Write tile values for this row
                 for x in 0..32 {
                     let addr = base_addr + y * 32 + x;
@@ -110,7 +111,7 @@ impl Nes {
                 }
                 writeln!(file)?;
             }
-    
+            
             // Print attribute table for this nametable
             writeln!(file, "\nAttribute Table:")?;
             let attr_base = base_addr + 0x3C0;
@@ -124,11 +125,12 @@ impl Nes {
                 writeln!(file)?;
             }
         }
+        
 
         // Add palette data section
         writeln!(file, "\nPalette Data")?;
         writeln!(file, "============")?;
-
+        
         // Background palettes (0x3F00-0x3F0F)
         writeln!(file, "\nBackground Palettes:")?;
         for i in 0..4 {
@@ -140,7 +142,7 @@ impl Nes {
             }
             writeln!(file)?;
         }
-
+        
         // Sprite palettes (0x3F10-0x3F1F)
         writeln!(file, "\nSprite Palettes:")?;
         for i in 0..4 {
@@ -152,6 +154,7 @@ impl Nes {
             }
             writeln!(file)?;
         }
+        
         Ok(())
     }
 

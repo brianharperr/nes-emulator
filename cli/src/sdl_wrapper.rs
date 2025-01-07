@@ -40,12 +40,12 @@ impl SDLWrapper {
             if self.nes.poll_frame() {
                 renderer.clear();
                 texture.update(None, &self.nes.frame(), 256 * 3).unwrap();
-
+  
                 let _ = renderer.copy(&texture, None, None);
                 renderer.present();
                 
             }
-            self.handle_input(&mut event_pump);
+            //self.handle_input(&mut event_pump);
         }
     }
 

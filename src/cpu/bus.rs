@@ -8,6 +8,8 @@ pub struct Bus {
 
     pub cycles: u64,
     pub reset: bool,
+
+    pub dma_transfer: (bool, u8),
 }
 
 impl Bus {
@@ -17,6 +19,8 @@ impl Bus {
             ppu: Ppu::new(),
             cycles: 0,
             reset: false,
+
+            dma_transfer: (false, 0),
         }
     }
 
@@ -44,9 +48,6 @@ impl Bus {
     }
 
     pub fn write(&mut self, addr: u16, data: u8) {
-        if addr == 0x2017 {
-            println!("HITTTTT");
-        }
         match addr {
             0x0000..0x2000 => {
                 self.ram.write(addr & 0x7FF, data);
@@ -66,7 +67,10 @@ impl Bus {
                 self.ppu.open_bus = data;
             }
             0x4000..0x4020 => { //APU / I/O
-                
+                if addr == 0x4014 { //DMA
+                    self.dma_transfer = (true, data);
+                    return;
+                }
             }
             0x4020..=0xFFFF => {
                 self.ppu.rom.mapper.write(addr, data);
