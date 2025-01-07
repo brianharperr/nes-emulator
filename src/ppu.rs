@@ -495,7 +495,6 @@ impl Ppu {
         if self.scanline >= 240 || self.cycle > 256 || self.cycle == 0 {
             return;
         }
-    
 
         let mut bg_pixel = 0u8;
         let mut bg_palette = 0u8;

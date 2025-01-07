@@ -8,6 +8,7 @@ pub mod controller;
 
 use std::fs;
 
+use controller::Button;
 use cpu::Cpu;
 use rom::Rom;
 pub enum SystemVersion {
@@ -54,6 +55,10 @@ impl Nes {
         self.cpu.pc = addr;
     }
 
+    pub fn set_button(&mut self, button: Button, pressed: bool) {
+        self.cpu.bus.controller1.set_button(button, pressed);
+    }
+    
     pub fn set_debug_mode(&mut self){
         self.cpu.debug_mode = true;
     }

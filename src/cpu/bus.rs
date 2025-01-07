@@ -1,4 +1,4 @@
-use crate::{memory::Memory, ppu::Ppu};
+use crate::{controller::Controller, memory::Memory, ppu::Ppu};
 
 const CPU_RAM_SIZE: usize = 0x800; //2KB
 
@@ -10,6 +10,8 @@ pub struct Bus {
     pub reset: bool,
 
     pub dma_transfer: (bool, u8),
+    pub controller1: Controller,
+    pub controller2: Controller,
 }
 
 impl Bus {
@@ -21,6 +23,8 @@ impl Bus {
             reset: false,
 
             dma_transfer: (false, 0),
+            controller1: Controller::new(),
+            controller2: Controller::new(),
         }
     }
 
@@ -38,6 +42,8 @@ impl Bus {
                     _ => self.ppu.open_bus
                 }
             }
+            0x4016 => self.controller1.read(),
+            0x4017 => self.controller2.read(),
             0x4000..0x4020 => { //APU / I/O
                 0
             }
@@ -65,6 +71,10 @@ impl Bus {
                     _ => {}
                 }
                 self.ppu.open_bus = data;
+            }
+            0x4016 => {
+                self.controller1.write(data);
+                self.controller2.write(data);
             }
             0x4000..0x4020 => { //APU / I/O
                 if addr == 0x4014 { //DMA
