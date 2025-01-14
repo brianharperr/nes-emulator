@@ -5,14 +5,14 @@ use sdl2::{event::Event, keyboard::{Keycode, Scancode}, rect::Rect};
 
 pub struct SDLWrapper{
     nes: Nes,
-    previous_keyboard_state: [bool; 8],
+    previous_keyboard_state: [bool; 8]
 }
 
 impl SDLWrapper {
     pub fn new(nes: Nes) -> Self {
         SDLWrapper{
             nes,
-            previous_keyboard_state: [false; 8],
+            previous_keyboard_state: [false; 8]
         }
     }
 
@@ -96,7 +96,6 @@ impl SDLWrapper {
     }
 
     fn handle_input(&mut self, event_pump: &mut sdl2::EventPump) -> bool {
-
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit { .. } => return false,

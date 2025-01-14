@@ -30,7 +30,7 @@ fn main() {
     
     let mut nes = Nes::new(nes_cpu::SystemVersion::NTSC);
     nes.set_rom(rom);
-    //nes.set_debug_mode();
+    // nes.set_debug_mode();
     nes.on();
     // nes.set_start(0xC000);
     // nes.run();

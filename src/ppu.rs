@@ -198,7 +198,6 @@ impl Ppu {
 
     pub fn step(&mut self){
         let render = self.is_rendering_enabled();
-
         match Scanline::from(self.scanline) {
             Scanline::PreRender => {
 
@@ -206,6 +205,10 @@ impl Ppu {
                     self.odd_frame = !self.odd_frame;
                 }
 
+                if self.cycle == 1 {
+                    self.status &= !0xE0;
+                }
+                
                 if render {
                     self.load_pixel();
                     self.load_shift_registers();
@@ -224,10 +227,11 @@ impl Ppu {
             Scanline::VBlank => {
                 if self.scanline == 241 && self.cycle == 1  {
                     self.status |= 0x80;
+                    // println!("S:{}, C:{}, VBLANK:{}", self.scanline, self.cycle, self.ctrl & 0x80 != 0);
                     if self.ctrl & 0x80 != 0 {
                         self.trigger_nmi = true;
-                        self.frame_ready = true;
                     }
+                    self.frame_ready = true;
                 }
             }
         }
@@ -693,19 +697,10 @@ impl Ppu {
 
     
     pub fn read_oam(&self) -> u8{
-        
         0xFF
     }
 
     pub fn read_data(&mut self) -> u8{
-        
-        
-        
-
-        
-        
-        
-
         let data = if (self.v & 0x3FFF) >= 0x3F00 {
             
             self.read(self.v)
