@@ -1,7 +1,11 @@
 use core::panic;
-use std::{fs::OpenOptions, io::{self, Write}};
+use std::{fs::OpenOptions, io::{self, Write}, iter::Scan};
 
 use crate::{memory::Memory, rom::{header::{Mirroring, HEADER_SIZE}, Rom}};
+
+const fn nth_bit(x: u16, n: u8) -> u16 {
+    (x >> n) & 1
+}
 
 pub static PALETTE: [u8; 192] = [
     124, 124, 124, 
@@ -33,19 +37,25 @@ pub static PALETTE: [u8; 192] = [
 
 #[derive(Copy, Clone)]
 pub struct Sprite {
+    id: u8,
     y: u8,
     tile: u8,
     attr: u8,
     x: u8,
+    pt_lo: u8,
+    pt_hi: u8
 }
 
 impl Sprite {
     pub fn new() -> Self {
         Sprite {
-            y: 0,
-            tile: 0,
-            attr: 0,
-            x: 0,
+            id: 64,
+            y: 0xFF,
+            tile: 0xFF,
+            attr: 0xFF,
+            x: 0xFF,
+            pt_lo: 0xFF,
+            pt_hi: 0xFF
         }
     }
 
@@ -110,8 +120,8 @@ pub struct Ppu {
     palette: [u8; 32],
 
     pub oam: [Sprite; 64],
-    pub secondary_oam: [u8; 8], 
-    pub sprite_cache: [u16; 256],
+    pub secondary_oam: [Sprite; 8], 
+    pub sprite_cache: [Sprite; 8],
     pub sprites: Vec<Sprite>,
     pub trigger_nmi: bool,
 
@@ -120,6 +130,8 @@ pub struct Ppu {
 
     pub frame_ready: bool,
     pub frame_buffer: [u8; 256 * 240 * 3],
+
+    addr_latch: u16,
 
     nt_byte: u8,
     at_byte: u8,
@@ -132,10 +144,6 @@ pub struct Ppu {
     at_shifter_hi: u8,
     pt_shifter_lo: u16,
     pt_shifter_hi: u16,
-
-    current_sprite: usize,
-    sprites_found: usize,
-    sprite_attr_index: usize,
 }
 
 impl Ppu {
@@ -166,9 +174,9 @@ impl Ppu {
             rom: Rom::new(vec![0; HEADER_SIZE]),
             palette: [0; 32],
 
-            oam: [Sprite { y:0, tile:0, attr:0, x:0 }; 64],
-            secondary_oam: [0xFF; 8],
-            sprite_cache: [0xFFFF; 256],
+            oam: [Sprite::new(); 64],
+            secondary_oam: [Sprite::new(); 8],
+            sprite_cache: [Sprite::new(); 8],
             sprites,
             trigger_nmi: false,
 
@@ -177,6 +185,8 @@ impl Ppu {
 
             frame_buffer: [0; 256 * 240 * 3],
             frame_ready: false,
+
+            addr_latch: 0,
 
             nt_byte: 0,
             at_byte: 0,
@@ -189,251 +199,173 @@ impl Ppu {
             at_shifter_hi: 0,
             pt_shifter_lo: 0,
             pt_shifter_hi: 0,
+        }
+    }
 
-            current_sprite: 0,
-            sprites_found: 0,
-            sprite_attr_index: 0,
+    fn cycle(&mut self, s: Scanline) {
+        let cycle = self.cycle;
+        if s == Scanline::VBlank && cycle == 1 {
+            self.status |= 0x80;
+            if self.ctrl & 0x80 != 0 {
+                self.trigger_nmi = true;
+            }
+        }else if s == Scanline::PostRender && cycle == 0 {
+            self.frame_ready = true;
+        }else if s == Scanline::PreRender || s == Scanline::Visible {
+            
+            match cycle {
+                1 => {
+                    self.clear_oam();
+                    if s == Scanline::PreRender {
+                        self.status &= 0x1F; 
+                    }
+                },
+                257 => self.eval_sprites(),
+                321 => self.load_sprites(),
+                _ => {}
+            }
+
+            
+            match cycle {
+                2..=255 | 322..=337 => {
+                    self.load_pixel();
+                    match cycle % 8 {
+                        1 => {
+                            self.addr_latch = self.nt_addr();
+                            self.reload_shifters();
+                        },
+                        2 => self.nt_byte = self.read(self.addr_latch),
+                        3 => self.addr_latch = self.at_addr(),
+                        4 => {
+                            self.at_byte = self.read(self.addr_latch);
+                            if self.coarse_y() & 2 != 0 { self.at_byte >>= 4 }
+                            if self.coarse_x() & 2 != 0 { self.at_byte >>= 2 }
+                        }
+                        5 => self.addr_latch = self.pt_addr(),
+                        6 => self.pt_latch_lo = self.read(self.addr_latch),
+                        7 => self.addr_latch += 8,
+                        0 => {
+                            self.pt_latch_hi = self.read(self.addr_latch);
+                            self.increment_h();
+                        },
+                        _ => unreachable!()
+                    }
+                },
+                256 => {
+                    self.load_pixel();
+                    self.pt_latch_hi = self.read(self.addr_latch);
+                    self.increment_v();
+                },
+                257 => {
+                    self.load_pixel();
+                    self.reload_shifters();
+                    self.copy_h();
+                },
+                280..=304 => if s == Scanline::PreRender { self.copy_v() },
+
+                1 => {
+                    self.addr_latch = self.nt_addr();
+                    if s == Scanline::PreRender {
+                        self.status &= 0x7F;
+                    }
+                },
+                321 | 339 => self.addr_latch = self.nt_addr(),
+                338 => self.nt_byte = self.read(self.addr_latch),
+                340 => {
+                    self.nt_byte = self.read(self.addr_latch);
+                    if s == Scanline::PreRender && self.odd_frame {
+                        self.cycle += 1;
+                    }
+                },
+                _ => {}
+            }
         }
     }
 
     pub fn step(&mut self){
-        let render = self.is_rendering_enabled();
-        match Scanline::from(self.scanline) {
-            Scanline::PreRender => {
-
-                if self.cycle == 0 {
-                    self.odd_frame = !self.odd_frame;
-                }
-
-                if self.cycle == 1 {
-                    self.status &= !0xE0;
-                }
-                
-                if render {
-                    self.load_pixel();
-                    self.load_shift_registers();
-                }
-            }
-            Scanline::Visible => {
-
-                if render {
-                    self.evaluate_sprites();
-                    self.load_pixel();
-                    self.load_shift_registers();
-                }
-                
-            }
-            Scanline::PostRender => {}
-            Scanline::VBlank => {
-                if self.scanline == 241 && self.cycle == 1  {
-                    self.status |= 0x80;
-                    // println!("S:{}, C:{}, VBLANK:{}", self.scanline, self.cycle, self.ctrl & 0x80 != 0);
-                    if self.ctrl & 0x80 != 0 {
-                        self.trigger_nmi = true;
-                    }
-                    self.frame_ready = true;
-                }
-            }
+        match self.scanline {
+            0..=239 => self.cycle(Scanline::Visible),
+            240 => self.cycle(Scanline::PostRender),
+            241 => self.cycle(Scanline::VBlank),
+            261 => self.cycle(Scanline::PreRender),
+            _ => {}
         }
 
-        let skip_cycle: bool = self.scanline == 261 && self.cycle == 339 && self.odd_frame && render;
-        if skip_cycle {
-            self.cycle = 0;
-            self.scanline = 0;
-        } else {
-            self.cycle += 1;
-            if self.cycle >= CYCLERS_PER_SCANLINE {
-                self.cycle = 0;
-                self.scanline = (self.scanline + 1) % NUM_SCANLINES;
+        self.cycle += 1;
+        if self.cycle > 340 {
+            self.cycle %= CYCLERS_PER_SCANLINE;
+            self.scanline += 1;
+            if self.scanline >= NUM_SCANLINES {
+                self.scanline = 0;
+                self.odd_frame = !self.odd_frame
             }
-        }
-
-        self.update_scroll();
-    }
-
-    fn evaluate_sprites(&mut self) {
-        let cycle = self.cycle;
-        
-        
-        if cycle == 1 {
-            self.secondary_oam = [0xFF; 8];
-            return;
-        }
-        
-        
-        if cycle == 65 {
-
-            let scanline = self.scanline as u16;
-            let mut n_idx = 0;
-            let mut n  = 0;
-            let sp_h = self.sprite_height() as u16;
-            for (i, sprite) in  self.oam.iter().enumerate() {
-                let y = sprite.y as u16;
-                if y <= scanline && scanline < y + sp_h {
-                    self.secondary_oam[n_idx] = i as u8;
-                    n_idx += 1;
-                    if n_idx == 8 {
-                        n = i + 1;
-                        break;
-                    }
-                }
-
-            }
-
-            if n == 8 {
-                let mut m = 0;
-                for i in 0..64 {
-                    for j in 0..4 {
-                        let y = match j {
-                            0 => self.oam[i].y,
-                            1 => self.oam[i].tile,
-                            2 => self.oam[i].attr,
-                            3 => self.oam[i].x,
-                            _ => unreachable!()
-                        };
-                        if y  as u16 <= scanline && scanline < y as u16 + sp_h {
-                            self.status |= 0x20;
-                        }else{
-                            m = (m + 1) & 3;
-                        }
-                        n += 1;
-                    }
-                }
-            }
-            return;
-        }
-        
-        
-        if cycle == 257{
-            self.fetch_sprite();
-            return;
         }
     }
 
-    fn fetch_sprite(&mut self) {
+    fn shift(&mut self){
+        self.at_shifter_lo = (self.at_shifter_lo << 1) | self.at_latch_lo;
+        self.at_shifter_hi = (self.at_shifter_hi << 1) | self.at_latch_hi;
+        self.pt_shifter_lo <<= 1;
+        self.pt_shifter_hi <<= 1;
+    }
 
-        self.sprite_cache = [0xFFFF; 256];
-
+    fn clear_oam(&mut self) {
         for i in 0..8 {
-            let j = self.secondary_oam[i];
-            if j == 0xFF {
-                break;
-            }
-    
-            let y = self.oam[j as usize].y;
-            let tile = self.oam[j as usize].tile;
-            let attr = self.oam[j as usize].attr;
-            let x = self.oam[j as usize].x;
-    
-            
-            let v_flip = attr & 0x80 != 0;
-            let h_flip = attr & 0x40 != 0;
-            
-            let y0 = self.scanline as u16 - y as u16;
-            let (pt, tile_num, y) = match self.sprite_height() {
-                8 => {
-                    let y = if v_flip { 7 - y0 as u8 } else { y0 as u8 };
-                    ((self.ctrl as u16 & 0x08) << 9, tile, y)
+            self.secondary_oam[i].y = 0xFF;
+            self.secondary_oam[i].tile = 0xFF;
+            self.secondary_oam[i].attr = 0xFF;
+            self.secondary_oam[i].x = 0xFF;
+        }
+    }
+
+    fn eval_sprites(&mut self) {
+
+        let mut n = 0;
+        for i in 0..64 {
+            let line: i16 = if self.scanline == 261 { -1 } else { self.scanline as i16 } - self.oam[i].y as i16;
+            let spr_height = self.sprite_height() as i16;
+            if line >= 0 && line < spr_height {
+                self.secondary_oam[n].id = i as u8;
+                self.secondary_oam[n].y = self.oam[i].y;
+                self.secondary_oam[n].tile = self.oam[i].tile;
+                self.secondary_oam[n].attr = self.oam[i].attr;
+                self.secondary_oam[n].x = self.oam[i].x;
+
+                n += 1;
+                if n >= 8 {
+                    self.status |= 0x20;
+                    return;
                 }
-                16 => {
-                    let y = if v_flip { 15 - y0 as u8 } else { y0 as u8 };
-                    (
-                        (tile as u16 & 1) << 12,
-                        (tile & !1u8) | (y >> 3),
-                        y & 0x7
-                    )
-                }
-                _ => unreachable!()
-            };
-    
-            let addr = pt | ((tile_num as u16) << 4) | y as u16;
-            let mut pt_lo = self.read(addr);
-            let mut pt_hi = self.read(addr + 8);
-    
-            if h_flip {
-                pt_lo = Ppu::reverse_byte(pt_lo);
-                pt_hi = Ppu::reverse_byte(pt_hi);
-            }
-    
-            let palette = attr & 3;
-            let x_max = if x as usize + 8 < 256 { x as usize + 8 } else { 256 };
-            
-            for p in (&mut self.sprite_cache[x as usize..x_max]).iter_mut().rev() {
-                if *p == 0xFFFF {
-                    let sp = ((palette << 2) | ((pt_hi & 1) << 1) | (pt_lo & 1)) as u16;
-                    if sp & 3 != 0 {
-                        *p = ((if j == 0 {1} else {0}) << 15) | (((attr >> 5) as u16 & 1) << 8) | sp;
-                    }
-                }
-                pt_hi >>= 1;
-                pt_lo >>= 1;
             }
         }
     }
 
-    #[inline(always)]
-    fn reverse_byte(mut x: u8) -> u8 {
-        x = ((x & 0xaa) >> 1) | ((x & 0x55) << 1);
-        x = ((x & 0xcc) >> 2) | ((x & 0x33) << 2);
-        x = ((x & 0xf0) >> 4) | ((x & 0x0f) << 4);
-        x
-    }
+    fn load_sprites(&mut self) {
+        for i in 0..8 {
 
-    fn get_pattern_address(&self, sprite_index: usize, row: u8) -> u16 {
-        let sprite = &self.sprites[sprite_index];
-        let mut pattern_addr = self.sprite_pattern_table_address();
-        
-        if self.sprite_height() == 16 {
-            pattern_addr = ((sprite.tile as u16 & 0x01) << 12) |
-                          ((sprite.tile as u16 & 0xFE) << 4);
-        } else {
-            pattern_addr += (sprite.tile as u16) << 4;
-        }
+            self.sprite_cache[i] = self.secondary_oam[i];
 
-        let final_row = if sprite.is_v_flipped() {
-            (self.sprite_height() - 1).wrapping_sub(row)
-        } else {
-            row
-        };
+            let mut addr: u16;
+            let sprite_height = self.sprite_height();
 
-        pattern_addr + final_row as u16
-    }
+            if sprite_height == 16 {
+                addr = ((self.sprite_cache[i].tile as u16 & 1) * 0x1000) + ((self.sprite_cache[i].tile as u16 & !1) * 16);
+            }else{
+                addr = self.sprite_pattern_table_address() + (self.sprite_cache[i].tile as u16 * 16);
+            }
 
-    fn update_scroll(&mut self) {
-        if !self.is_rendering_enabled() {
-            return;
-        }
-    
-        
-        if self.scanline < 240 || self.scanline == 261 {
-            
-            if self.cycle > 0 && self.cycle <= 256 {
-                if self.cycle % 8 == 0 {
-                    self.increment_h();
-                }
-            } else if self.cycle >= 321 && self.cycle <= 336 {
-                if self.cycle % 8 == 0 {
-                    self.increment_h();
-                }
+            let mut sprite_y = self.scanline.wrapping_sub(self.sprite_cache[i].y as usize) % sprite_height as usize;
+            if self.sprite_cache[i].attr & 0x80 != 0 {
+                sprite_y ^= sprite_height as usize - 1;
             }
-    
-            
-            if self.cycle == 256 {
-                self.increment_v();
-            }
-    
-            
-            if self.cycle == 257 {
-                self.copy_h();
-            }
-    
-            
-            if self.scanline == 261 && self.cycle >= 280 && self.cycle <= 304 {
-                self.copy_v();
-            }
+            addr += sprite_y as u16 + (sprite_y as u16 & 8);
+
+            self.sprite_cache[i].pt_lo = self.read(addr);
+            self.sprite_cache[i].pt_hi = self.read(addr + 8);
         }
     }
 
+    #[inline]
     fn reload_shifters(&mut self) {
         self.pt_shifter_lo = (self.pt_shifter_lo & 0xFF00) | self.pt_latch_lo as u16;
         self.pt_shifter_hi = (self.pt_shifter_hi & 0xFF00) | self.pt_latch_hi as u16;
@@ -442,149 +374,99 @@ impl Ppu {
         self.at_latch_hi = self.at_byte & 2;
     }
 
-    fn load_shift_registers(&mut self) {
-        match self.cycle {
-            1..=256 | 321..=336 => {
-
-                match (self.cycle - 1) % 8 {
-                    0 => { 
-                        self.nt_byte = self.get_nt();
-                    }
-                    2 => { 
-              
-                        self.at_byte = self.get_attribute();
-                        
-                        if (self.coarse_y() & 2) != 0 {
-                            self.at_byte >>= 4;
-                        }
-
-                        if (self.coarse_x() & 2) != 0 {
-                            self.at_byte >>= 2;
-                        }
-                        
-                        
-                    }
-                    4 => { 
-                        let addr = self.bg_pattern_table_address() + (self.nt_byte as u16 * 16) + self.fine_y();
-                        self.pt_latch_lo = self.read(addr);
-                    }
-                    6 => { 
-                        let addr = self.bg_pattern_table_address() + (self.nt_byte as u16 * 16) + self.fine_y();
-                        self.pt_latch_hi = self.read(addr + 8);
-                    }
-                    7 => {
-                        self.reload_shifters();
-                    }
-                    _ => {}
-                }
-            }
-            257..=320 => {
-                if self.cycle == 257 {
-                    self.reload_shifters();
-                }
-            }
-            337 => {
-                self.nt_byte = self.get_nt();
-            }
-            339 => {
-                self.nt_byte = self.get_nt();
-            }
-            _ => {}
-
-        }
-    }
-
     fn load_pixel(&mut self) {
         
-        if self.scanline >= 240 || self.cycle > 256 || self.cycle == 0 {
-            return;
+        if self.cycle < 2 {
+            return; 
         }
-
-        let mut bg_pixel = 0u8;
-        let mut bg_palette = 0u8;
+        let x = self.cycle - 2;
     
-        if self.is_bg_rendering_enabled() {
+        let mut palette = 0u8;
+        let mut obj_palette = 0u8;
+        let mut obj_priority = false;
+    
+        if self.scanline < 240 && x < 256 {
             
-            if self.cycle >= 8 || self.is_leftmost_bg_rendering_enabled() {
-                
+            if self.is_bg_rendering_enabled() && (x >= 8 || self.is_leftmost_bg_rendering_enabled()) {
                 let fine_x = self.x & 0x7;
-                let shift = (15 - fine_x) as u16;
-                bg_pixel = ((((self.pt_shifter_hi >> shift) & 1) << 1) | ((self.pt_shifter_lo >> shift) & 1)) as u8;
-
-                bg_palette = ((((self.at_shifter_hi >> (7 - fine_x)) & 1) << 1) | ((self.at_shifter_lo >> (7 - fine_x)) & 1)) << 2;
+                palette = (nth_bit(self.pt_shifter_hi, 15 - fine_x) << 1) as u8
+                    | nth_bit(self.pt_shifter_lo, 15 - fine_x) as u8;
+                if palette != 0 {
+                    palette |= ((nth_bit(self.at_shifter_hi as u16, 7 - fine_x) << 1) as u8
+                        | nth_bit(self.at_shifter_lo as u16, 7 - fine_x) as u8)
+                        << 2;
+                }
             }
+    
+            if self.is_sprite_rendering_enabled() && (x >= 8 || self.is_leftmost_sprite_rendering_enabled()) {
+                for i in (0..8).rev() {
+                    if self.sprite_cache[i].id == 64 {
+                        continue; 
+                    }
+    
+                    let sprite_x = x.wrapping_sub(self.sprite_cache[i].x as usize);
+                    if sprite_x >= 8 {
+                        continue; 
+                    }
+    
+                    let mut sprite_x_adjusted = sprite_x;
+                    if self.sprite_cache[i].attr & 0x40 != 0 {
+                        sprite_x_adjusted ^= 7; 
+                    }
+    
+                    let sprite_palette = ((nth_bit(self.sprite_cache[i].pt_hi as u16, 7 - sprite_x_adjusted as u8) << 1)
+                        | nth_bit(self.sprite_cache[i].pt_lo as u16, 7 - sprite_x_adjusted as u8)) as u8;
+                    if sprite_palette == 0 {
+                        continue; 
+                    }
+    
+                    if self.sprite_cache[i].id == 0 && palette != 0 && x != 255 {
+                        self.status |= 0x40; 
+                    }
+    
+                    let final_sprite_palette =
+                        sprite_palette | ((self.sprite_cache[i].attr & 0x03) << 2);
+                    obj_palette = final_sprite_palette + 16;
+                    obj_priority = self.sprite_cache[i].attr & 0x20 != 0;
+                }
+            }
+    
+            
+            if obj_palette != 0 && (palette == 0 || !obj_priority) {
+                palette = obj_palette;
+            }
+    
+            
+            if !self.is_rendering_enabled() {
+                palette = 0;
+            }
+    
+            
+            let color = (self.palette[palette as usize] & 0x3F) as usize;
+            let idx = (self.scanline * 256 + x) * 3;
+    
+            self.frame_buffer[idx] = PALETTE[color * 3];
+            self.frame_buffer[idx + 1] = PALETTE[color * 3 + 1];
+            self.frame_buffer[idx + 2] = PALETTE[color * 3 + 2];
         }
     
-        let mut sprite_pixel = 0u8;
-        let mut sprite_palette = 0u8;
-        let mut sprite_priority = false;
-        
-        if self.is_sprite_rendering_enabled() {
-            if self.cycle >= 8 || self.is_leftmost_sprite_rendering_enabled() {
-                let x = self.cycle - 1;
-                let p = self.sprite_cache[x];
-                if p != 0xFFFF {
-                    if (p >> 15 == 1) && bg_pixel != 0 && x != 0xFF {
-                        self.status |= 0x40;
-                    }
-                    sprite_priority = (p >> 8) & 1 != 0;
-                    let palette_and_pixel = p & 0xFF;
-                    sprite_pixel = (palette_and_pixel & 0x03) as u8;
-                    if sprite_pixel != 0 {
-                        sprite_palette = ((palette_and_pixel & 0x0C) | 0x10) as u8;
-                    }
-                }
-            }
-        }
-
-        let (final_pixel, final_palette) = match (bg_pixel, sprite_pixel) {
-            (0, 0) => (0, 0), 
-            (0, _) => (sprite_pixel, sprite_palette), 
-            (_, 0) => (bg_pixel, bg_palette), 
-            (_, _) => {
-                
-                if sprite_priority {
-                    (bg_pixel, bg_palette) 
-                } else {
-                    (sprite_pixel, sprite_palette) 
-                }
-            }
-        };
-
-        let palette_idx = if final_pixel == 0 { 0 } else { final_palette | final_pixel };
-        
-        
-        let color = (self.palette[palette_idx as usize] & 0x3F) as usize;
-        let x = self.cycle - 1;
-        let y = self.scanline;
-        let idx = (y * 256 + x) * 3;
-
-        self.frame_buffer[idx] = PALETTE[color * 3];
-        self.frame_buffer[idx + 1] = PALETTE[(color * 3) + 1];
-        self.frame_buffer[idx + 2] = PALETTE[(color * 3) + 2];
-
-        self.pt_shifter_lo <<= 1;
-        self.pt_shifter_hi <<= 1;
-        self.at_shifter_lo = (self.at_shifter_lo << 1) | self.at_latch_lo;
-        self.at_shifter_hi = (self.at_shifter_hi << 1) | self.at_latch_hi;
-
+        self.shift();
     }
 
-    fn is_sprite_in_range(&self, y_coordinate: u8) -> bool {
-        let diff = self.scanline as i16 - y_coordinate as i16;
-        diff >= 0 && diff < self.sprite_height() as i16
+    #[inline]
+    fn nt_addr(&self) -> u16{
+        0x2000 | (self.v & 0xFFF)
     }
 
-    fn get_nt(&mut self) -> u8{
-        let addr = 0x2000 | (self.v & 0x0FFF);
-        self.read(addr)
+    #[inline]
+    fn at_addr(&self) -> u16{
+        0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07)
     }
 
-    fn get_attribute(&mut self) -> u8{
-        let addr = 0x23C0 | (self.v & 0x0C00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 0x07);
-        self.read(addr)
+    #[inline]
+    fn pt_addr(&self) -> u16{
+        self.bg_pattern_table_address() + (self.nt_byte as u16 * 16) + self.fine_y()
     }
-
 
     pub fn read(&mut self, addr: u16) -> u8 {
         let mut m_addr = addr & 0x3FFF; 
@@ -594,7 +476,6 @@ impl Ppu {
                 self.rom.mapper.read(m_addr)
             }
             0x2000..0x3F00 => {
-                
                 let v_addr = self.map_vram_addr(m_addr);
                 self.vram.read(v_addr)
             }
@@ -763,14 +644,13 @@ impl Ppu {
         self.w = !self.w;
     }
 
-    pub fn write_addr(&mut self, data: u8){
+    pub fn write_addr(&mut self, data: u8) {
         if !self.w {
             self.t = (self.t & 0x00FF) | ((data as u16 & 0x3F) << 8);
-        }else{
+        } else {
             self.t = (self.t & 0xFF00) | (data as u16);
             self.v = self.t;
         }
-        
         self.w = !self.w;
     }
 
@@ -830,6 +710,10 @@ impl Ppu {
     }
     
     fn increment_h(&mut self) {
+        if !self.is_rendering_enabled() {
+            return;
+        }
+
         if (self.v & 0x001F) == 31 {
             self.v = (self.v & !0x001F) ^ 0x0400;
         } else {
@@ -839,6 +723,10 @@ impl Ppu {
 
     
     fn increment_v(&mut self){
+
+        if !self.is_rendering_enabled() {
+            return;
+        }
 
         if (self.v & 0x7000) != 0x7000{
             self.v += 0x1000;
@@ -860,11 +748,17 @@ impl Ppu {
 
     
     fn copy_h(&mut self) {
+        if !self.is_rendering_enabled() {
+            return;
+        }
         self.v = (self.v & !0x041F) | (self.t & 0x041F);
     }
 
     
     fn copy_v(&mut self) {
+        if !self.is_rendering_enabled() {
+            return;
+        }
         let y_mask = 0x7000 | 0x0800 | 0x03E0;
         self.v = (self.v & !y_mask) | (self.t & y_mask);
     }
